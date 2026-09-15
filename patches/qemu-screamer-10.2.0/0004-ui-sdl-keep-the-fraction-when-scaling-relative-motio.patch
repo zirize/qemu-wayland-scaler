@@ -1,0 +1,81 @@
+From 4aa68d34b7503dcf79c02c5ecbef67d5789f9e96 Mon Sep 17 00:00:00 2001
+From: zirize <zirize@gmail.com>
+Date: Wed, 16 Sep 2026 04:06:16 +0900
+Subject: [PATCH 4/5] ui/sdl: keep the fraction when scaling relative motion
+
+handle_mousemotion() scales the relative motion from window coordinates
+down to guest pixels with an integer division, so the fraction is lost on
+every event rather than accumulated. The factor is below one whenever the
+window is larger than the guest, which is the usual case: at 1360x768 in
+a 1876-wide window it is 0.72, and a one pixel movement of the mouse
+becomes zero.
+
+The guest pointer then stands still while the mouse is moved slowly and
+catches up only once the movement is fast enough for the product to reach
+one, which reads as a badly tuned acceleration curve rather than as lost
+motion.
+
+Accumulate the remainder and fold it into the next event. Reset it when
+relative mode is entered, since the pointer is warped at that point.
+
+Signed-off-by: zirize <zirize@gmail.com>
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+---
+ include/ui/sdl2.h |  2 ++
+ ui/sdl2.c         | 20 ++++++++++++++++++--
+ 2 files changed, 20 insertions(+), 2 deletions(-)
+
+diff --git a/include/ui/sdl2.h b/include/ui/sdl2.h
+index dbe6e3d973..0d6a6f46e2 100644
+--- a/include/ui/sdl2.h
++++ b/include/ui/sdl2.h
+@@ -32,6 +32,8 @@ struct sdl2_console {
+     DisplaySurface *surface;
+     DisplayOptions *opts;
+     SDL_Texture *texture;
++    /* sub-pixel remainder of relative motion not yet sent to the guest */
++    double rel_rem_x, rel_rem_y;
+     SDL_Window *real_window;
+     SDL_Renderer *real_renderer;
+     int idx;
+diff --git a/ui/sdl2.c b/ui/sdl2.c
+index 1f5cd68ecb..be9cc7f61f 100644
+--- a/ui/sdl2.c
++++ b/ui/sdl2.c
+@@ -221,6 +221,7 @@ static void sdl_hide_cursor(struct sdl2_console *scon)
+ 
+     if (!qemu_input_is_absolute(scon->dcl.con)) {
+         SDL_SetRelativeMouseMode(SDL_TRUE);
++        scon->rel_rem_x = scon->rel_rem_y = 0;
+     }
+ }
+ 
+@@ -520,8 +521,23 @@ static void handle_mousemotion(SDL_Event *ev)
+     surf_h = surface_height(scon->surface);
+     x = (int64_t)ev->motion.x * surf_w / scr_w;
+     y = (int64_t)ev->motion.y * surf_h / scr_h;
+-    dx = (int64_t)ev->motion.xrel * surf_w / scr_w;
+-    dy = (int64_t)ev->motion.yrel * surf_h / scr_h;
++
++    /*
++     * Relative motion is reported in window coordinates and has to be scaled
++     * down to guest pixels, which rarely comes out whole: at a 2x zoom one
++     * host pixel is worth half a guest pixel. Truncating each event on its
++     * own would drop that fraction every time, so slow movements would not
++     * move the guest pointer at all while fast ones would - which feels like
++     * a broken acceleration curve. Keep the remainder and fold it into the
++     * next event instead.
++     */
++    scon->rel_rem_x += (double)ev->motion.xrel * surf_w / scr_w;
++    scon->rel_rem_y += (double)ev->motion.yrel * surf_h / scr_h;
++    dx = (int)scon->rel_rem_x;
++    dy = (int)scon->rel_rem_y;
++    scon->rel_rem_x -= dx;
++    scon->rel_rem_y -= dy;
++
+     if (gui_grab || qemu_input_is_absolute(scon->dcl.con) || absolute_enabled) {
+         sdl_send_mouse_event(scon, dx, dy, x, y, ev->motion.state);
+     }
+-- 
+2.53.0
+

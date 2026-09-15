@@ -1,0 +1,326 @@
+From 03daa722165296e7dfee15c738827141599329de Mon Sep 17 00:00:00 2001
+From: zirize <zirize@gmail.com>
+Date: Wed, 16 Sep 2026 04:06:30 +0900
+Subject: [PATCH 5/5] ui: add a scaler option for the SDL display
+
+The guest display is always stretched to the window with a bilinear
+filter, which is a poor fit for the low resolution guests SDL tends to be
+used for: text and dithering come out blurred. Nearest neighbour avoids
+that but, since the window is rarely an exact multiple of the guest
+resolution, it makes some guest pixels wider than others.
+
+Add a scaler= option with four modes. @nearest and @linear pick the
+filter and otherwise keep the existing letterboxing done by
+SDL_RenderSetLogicalSize(). @integer scales by the largest whole number
+that fits and letterboxes the remainder, so every guest pixel is the same
+size. @integerplus scales by a whole number into an intermediate render
+target with no interpolation and stretches that to the window, filling it
+without the uneven pixels of plain nearest neighbour.
+
+The option is on DisplayOptions rather than DisplaySDL so that other
+display backends can implement it too.
+
+Signed-off-by: zirize <zirize@gmail.com>
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+---
+ include/ui/sdl2.h |   3 +
+ qapi/ui.json      |  31 ++++++++-
+ qemu-options.hx   |  10 +++
+ ui/sdl2-2d.c      | 164 +++++++++++++++++++++++++++++++++++++++++++++-
+ 4 files changed, 204 insertions(+), 4 deletions(-)
+
+diff --git a/include/ui/sdl2.h b/include/ui/sdl2.h
+index 0d6a6f46e2..2c6c9a602a 100644
+--- a/include/ui/sdl2.h
++++ b/include/ui/sdl2.h
+@@ -32,6 +32,9 @@ struct sdl2_console {
+     DisplaySurface *surface;
+     DisplayOptions *opts;
+     SDL_Texture *texture;
++    /* intermediate render target used by DISPLAY_SCALER_INTEGERPLUS */
++    SDL_Texture *scaler_target;
++    int scaler_target_w, scaler_target_h;
+     /* sub-pixel remainder of relative motion not yet sent to the guest */
+     double rel_rem_x, rel_rem_y;
+     SDL_Window *real_window;
+diff --git a/qapi/ui.json b/qapi/ui.json
+index e3da77632a..a98cdfa1ae 100644
+--- a/qapi/ui.json
++++ b/qapi/ui.json
+@@ -1387,6 +1387,31 @@
+                 '*p2p': 'bool',
+                 '*audiodev': 'str' } }
+ 
++##
++# @DisplayScaler:
++#
++# Filter used when the guest display is scaled to the window.
++#
++# @linear: Bilinear interpolation.  Smooth, but blurs the
++#     sharp edges of a low resolution guest.
++#
++# @nearest: Nearest neighbour.  Keeps edges sharp, but the
++#     window is rarely an exact multiple of the guest size,
++#     so some guest pixels end up wider than others.
++#
++# @integer: Nearest neighbour at the largest integer multiple
++#     that fits, leaving black borders.  Every guest pixel
++#     comes out the same size.
++#
++# @integerplus: Nearest neighbour at an integer multiple,
++#     then bilinear the rest of the way to fill the window.
++#     Keeps most of the sharpness of @integer, no borders.
++#
++# Since: 10.2
++##
++{ 'enum'    : 'DisplayScaler',
++  'data'    : [ 'linear', 'nearest', 'integer', 'integerplus' ] }
++
+ ##
+ # @DisplayGLMode:
+ #
+@@ -1547,6 +1572,9 @@
+ #
+ # @gl: Enable OpenGL support (default: off).
+ #
++# @scaler: Filter used when scaling the guest display to the window
++#     (default: linear).  (since: 10.2)
++#
+ # Since: 2.12
+ ##
+ { 'union'   : 'DisplayOptions',
+@@ -1554,7 +1582,8 @@
+                 '*full-screen'   : 'bool',
+                 '*window-close'  : 'bool',
+                 '*show-cursor'   : 'bool',
+-                '*gl'            : 'DisplayGLMode' },
++                '*gl'            : 'DisplayGLMode',
++                '*scaler'        : 'DisplayScaler' },
+   'discriminator' : 'type',
+   'data'    : {
+       'gtk': { 'type': 'DisplayGTK', 'if': 'CONFIG_GTK' },
+diff --git a/qemu-options.hx b/qemu-options.hx
+index fca2b7bc74..8edc87e3c5 100644
+--- a/qemu-options.hx
++++ b/qemu-options.hx
+@@ -2129,11 +2129,13 @@ DEF("display", HAS_ARG, QEMU_OPTION_display,
+ #if defined(CONFIG_SDL)
+     "-display sdl[,gl=on|core|es|off][,grab-mod=<mod>][,show-cursor=on|off]\n"
+     "            [,window-close=on|off]\n"
++    "            [,scaler=linear|nearest|integer|integerplus]\n"
+ #endif
+ #if defined(CONFIG_GTK)
+     "-display gtk[,full-screen=on|off][,gl=on|off][,grab-on-hover=on|off]\n"
+     "            [,show-tabs=on|off][,show-cursor=on|off][,window-close=on|off]\n"
+     "            [,show-menubar=on|off][,zoom-to-fit=on|off]\n"
++    "            [,scaler=linear|nearest|integer|integerplus]\n"
+ #endif
+ #if defined(CONFIG_VNC)
+     "-display vnc=<display>[,<optargs>]\n"
+@@ -2206,6 +2208,14 @@ SRST
+ 
+         ``window-close=on|off`` : Allow to quit qemu with window close button
+ 
++        ``scaler=linear|nearest|integer|integerplus`` : Filter used when
++        the guest display is scaled to the window. ``linear`` (the default)
++        is smooth but blurry; ``nearest`` keeps edges sharp at the cost of
++        unevenly sized guest pixels; ``integer`` scales by a whole number
++        only and letterboxes the rest; ``integerplus`` scales by a whole
++        number first and then stretches the remainder, filling the window
++        while staying sharper than ``linear``.
++
+     ``gtk``
+         Display video output in a GTK window. This interface provides
+         drop-down menus and other UI elements to configure and control
+diff --git a/ui/sdl2-2d.c b/ui/sdl2-2d.c
+index 73052383c2..eff393493b 100644
+--- a/ui/sdl2-2d.c
++++ b/ui/sdl2-2d.c
+@@ -28,6 +28,151 @@
+ #include "ui/input.h"
+ #include "ui/sdl2.h"
+ 
++static DisplayScaler sdl2_2d_scaler(struct sdl2_console *scon)
++{
++    if (scon->opts->has_scaler) {
++        return scon->opts->scaler;
++    }
++    return DISPLAY_SCALER_LINEAR;
++}
++
++/*
++ * Draw the guest texture into the window.
++ *
++ * SDL_RenderSetLogicalSize() already letterboxes the guest and scales it to
++ * the window, so @linear and @nearest only differ in the filter set on the
++ * texture. @integer and @integerplus need the destination rectangle worked
++ * out by hand, because SDL would otherwise use the largest fractional scale
++ * that fits.
++ */
++static void sdl2_2d_present(struct sdl2_console *scon)
++{
++    DisplayScaler scaler = sdl2_2d_scaler(scon);
++    int fbw = surface_width(scon->surface);
++    int fbh = surface_height(scon->surface);
++    int ww, wh, mult, tw, th;
++    SDL_Rect dst;
++
++    /*
++     * How far the window may fall short of a whole multiple and still be
++     * treated as one. A fractional-scale compositor rounds to whole physical
++     * pixels, which costs at most a pixel here.
++     */
++    const int SCALER_SNAP = 2;
++
++    SDL_RenderClear(scon->real_renderer);
++
++    if (scaler == DISPLAY_SCALER_LINEAR || scaler == DISPLAY_SCALER_NEAREST) {
++        SDL_RenderCopy(scon->real_renderer, scon->texture, NULL, NULL);
++        SDL_RenderPresent(scon->real_renderer);
++        return;
++    }
++
++    /*
++     * The logical size makes SDL letterbox for us, which is the opposite of
++     * what is wanted here: the destination rectangle has to be computed in
++     * real output pixels.
++     */
++    SDL_RenderSetLogicalSize(scon->real_renderer, 0, 0);
++    if (SDL_GetRendererOutputSize(scon->real_renderer, &ww, &wh) != 0) {
++        SDL_GetWindowSize(scon->real_window, &ww, &wh);
++    }
++
++    /*
++     * A compositor running at a fractional scale rounds the window to whole
++     * physical pixels, so a window sized to be exactly N times the guest can
++     * come back a pixel short. Flooring there would drop a whole step - 2x
++     * would become 1x and half the window would turn into border - so let
++     * the multiple round up across that last pixel or two.
++     */
++    mult = MIN((ww + SCALER_SNAP) / fbw, (wh + SCALER_SNAP) / fbh);
++    if (mult < 1) {
++        /* Window smaller than the guest: fall back to fitting it. */
++        mult = 1;
++    }
++    tw = fbw * mult;
++    th = fbh * mult;
++
++    if (scaler == DISPLAY_SCALER_INTEGER) {
++        dst.w = tw;
++        dst.h = th;
++        dst.x = (ww - dst.w) / 2;
++        dst.y = (wh - dst.h) / 2;
++        SDL_RenderCopy(scon->real_renderer, scon->texture, NULL, &dst);
++        SDL_RenderPresent(scon->real_renderer);
++        return;
++    }
++
++    /*
++     * integerplus: blow the guest up by @mult with no interpolation first,
++     * then stretch that to the window with a bilinear filter. Scaling up
++     * before filtering keeps the pixel edges of the guest mostly intact, so
++     * the result stays sharper than a plain bilinear stretch while still
++     * filling the window.
++     */
++    {
++        int fit;
++
++        /* Where the guest would land if stretched to fill the window. */
++        if ((int64_t)ww * fbh < (int64_t)wh * fbw) {
++            fit = ww;
++            dst.w = fit;
++            dst.h = fbh * fit / fbw;
++        } else {
++            fit = wh;
++            dst.h = fit;
++            dst.w = fbw * fit / fbh;
++        }
++
++        /*
++         * If that is already the whole multiple, give or take the pixel the
++         * compositor rounded away, the second pass would only resample by a
++         * pixel - all blur, no gain. Draw the integer scale instead.
++         */
++        if (ABS(dst.w - tw) <= SCALER_SNAP && ABS(dst.h - th) <= SCALER_SNAP) {
++            dst.w = tw;
++            dst.h = th;
++            dst.x = (ww - dst.w) / 2;
++            dst.y = (wh - dst.h) / 2;
++            SDL_RenderCopy(scon->real_renderer, scon->texture, NULL, &dst);
++            SDL_RenderPresent(scon->real_renderer);
++            return;
++        }
++
++        if (!scon->scaler_target ||
++            scon->scaler_target_w != tw || scon->scaler_target_h != th) {
++            if (scon->scaler_target) {
++                SDL_DestroyTexture(scon->scaler_target);
++            }
++            scon->scaler_target =
++                SDL_CreateTexture(scon->real_renderer,
++                                  SDL_PIXELFORMAT_ARGB8888,
++                                  SDL_TEXTUREACCESS_TARGET, tw, th);
++            scon->scaler_target_w = tw;
++            scon->scaler_target_h = th;
++        }
++
++        if (scon->scaler_target) {
++            SDL_SetTextureScaleMode(scon->scaler_target, SDL_ScaleModeLinear);
++            SDL_SetRenderTarget(scon->real_renderer, scon->scaler_target);
++            SDL_RenderClear(scon->real_renderer);
++            SDL_RenderCopy(scon->real_renderer, scon->texture, NULL, NULL);
++            SDL_SetRenderTarget(scon->real_renderer, NULL);
++            SDL_RenderClear(scon->real_renderer);
++        }
++
++        dst.x = (ww - dst.w) / 2;
++        dst.y = (wh - dst.h) / 2;
++
++        SDL_RenderCopy(scon->real_renderer,
++                       scon->scaler_target ? scon->scaler_target
++                                           : scon->texture,
++                       NULL, &dst);
++    }
++
++    SDL_RenderPresent(scon->real_renderer);
++}
++
+ void sdl2_2d_update(DisplayChangeListener *dcl,
+                     int x, int y, int w, int h)
+ {
+@@ -51,9 +196,7 @@ void sdl2_2d_update(DisplayChangeListener *dcl,
+     SDL_UpdateTexture(scon->texture, &rect,
+                       surface_data(surf) + surface_data_offset,
+                       surface_stride(surf));
+-    SDL_RenderClear(scon->real_renderer);
+-    SDL_RenderCopy(scon->real_renderer, scon->texture, NULL, NULL);
+-    SDL_RenderPresent(scon->real_renderer);
++    sdl2_2d_present(scon);
+ }
+ 
+ void sdl2_2d_switch(DisplayChangeListener *dcl,
+@@ -121,6 +264,21 @@ void sdl2_2d_switch(DisplayChangeListener *dcl,
+                                       SDL_TEXTUREACCESS_STREAMING,
+                                       surface_width(new_surface),
+                                       surface_height(new_surface));
++    /*
++     * Set the filter on the texture itself rather than relying on
++     * SDL_HINT_RENDER_SCALE_QUALITY, which the embedder may have set to
++     * something else before SDL was initialised.
++     */
++    SDL_SetTextureScaleMode(scon->texture,
++                            sdl2_2d_scaler(scon) == DISPLAY_SCALER_LINEAR
++                            ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
++
++    /* The guest resolution changed, so any intermediate target is stale. */
++    if (scon->scaler_target) {
++        SDL_DestroyTexture(scon->scaler_target);
++        scon->scaler_target = NULL;
++        scon->scaler_target_w = scon->scaler_target_h = 0;
++    }
+     sdl2_2d_redraw(scon);
+ }
+ 
+-- 
+2.53.0
+

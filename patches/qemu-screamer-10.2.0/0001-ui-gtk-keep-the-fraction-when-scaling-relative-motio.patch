@@ -1,0 +1,110 @@
+From 8e35d5441ce8faf07a578c08cfadd323156d5882 Mon Sep 17 00:00:00 2001
+From: zirize <zirize@gmail.com>
+Date: Wed, 16 Sep 2026 04:05:45 +0900
+Subject: [PATCH 1/5] ui/gtk: keep the fraction when scaling relative motion
+
+gd_motion_event() converts the pointer position from widget to guest
+coordinates by dividing by gfx.scale_x/scale_y, and stores the result in
+an int. In relative mode the guest is then sent the difference between
+consecutive events, so the truncation is not a rounding detail: the
+fraction is discarded on every event rather than accumulated.
+
+With the window enlarged - zoom-to-fit on a display larger than the
+guest, say - one host pixel is worth less than one guest pixel. Moving
+the mouse slowly then produces a delta of zero every time and the guest
+pointer does not move at all, while moving it quickly falls short of the
+distance travelled, with the shortfall building up as the pointer moves.
+Truncation is toward zero, so left and up lose the fraction differently
+from right and down and the pointer drifts.
+
+Keep last_x/last_y as doubles, report only the whole part and carry the
+remainder into the next event.
+
+Signed-off-by: zirize <zirize@gmail.com>
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+---
+ include/ui/gtk.h |  4 ++--
+ ui/gtk.c         | 36 +++++++++++++++++++++++++++++-------
+ 2 files changed, 31 insertions(+), 9 deletions(-)
+
+diff --git a/include/ui/gtk.h b/include/ui/gtk.h
+index 3e6ce3cb48..f6d6984ecb 100644
+--- a/include/ui/gtk.h
++++ b/include/ui/gtk.h
+@@ -129,8 +129,8 @@ struct GtkDisplayState {
+     GtkWidget *notebook;
+     int button_mask;
+     gboolean last_set;
+-    int last_x;
+-    int last_y;
++    double last_x;
++    double last_y;
+     int grab_x_root;
+     int grab_y_root;
+     VirtualConsole *kbd_owner;
+diff --git a/ui/gtk.c b/ui/gtk.c
+index 48571bedbf..db3e78ed23 100644
+--- a/ui/gtk.c
++++ b/ui/gtk.c
+@@ -979,6 +979,7 @@ static gboolean gd_motion_event(GtkWidget *widget, GdkEventMotion *motion,
+     VirtualConsole *vc = opaque;
+     GtkDisplayState *s = vc->s;
+     int fbx, fby;
++    double fbx_exact, fby_exact;
+     int wx_offset, wy_offset;
+     int wh_surface, ww_surface;
+     int ww_widget, wh_widget;
+@@ -1010,8 +1011,10 @@ static gboolean gd_motion_event(GtkWidget *widget, GdkEventMotion *motion,
+      * `motion` is reported in `widget` coordinates
+      * so translating it to the coordinates in `vc`.
+      */
+-    fbx = (motion->x - wx_offset) / vc->gfx.scale_x;
+-    fby = (motion->y - wy_offset) / vc->gfx.scale_y;
++    fbx_exact = (motion->x - wx_offset) / vc->gfx.scale_x;
++    fby_exact = (motion->y - wy_offset) / vc->gfx.scale_y;
++    fbx = fbx_exact;
++    fby = fby_exact;
+ 
+     trace_gd_motion_event(ww_widget, wh_widget,
+                           gtk_widget_get_scale_factor(widget), fbx, fby);
+@@ -1027,13 +1030,32 @@ static gboolean gd_motion_event(GtkWidget *widget, GdkEventMotion *motion,
+         qemu_input_queue_abs(vc->gfx.dcl.con, INPUT_AXIS_Y, fby,
+                              0, surface_height(vc->gfx.ds));
+         qemu_input_event_sync();
++        s->last_x = fbx_exact;
++        s->last_y = fby_exact;
+     } else if (s->last_set && s->ptr_owner == vc) {
+-        qemu_input_queue_rel(vc->gfx.dcl.con, INPUT_AXIS_X, fbx - s->last_x);
+-        qemu_input_queue_rel(vc->gfx.dcl.con, INPUT_AXIS_Y, fby - s->last_y);
+-        qemu_input_event_sync();
++        /*
++         * The guest-relative delta is `motion` scaled down by scale_x/scale_y.
++         * When the window is enlarged (scale > 1) a single host pixel is worth
++         * less than one guest pixel, so truncating the delta to an integer
++         * would throw the fraction away on every event: slow movements would
++         * produce no motion at all and fast ones would fall short, with the
++         * error accumulating as the pointer moves. Report the whole part and
++         * carry the remainder over to the next event instead.
++         */
++        int rel_x = fbx_exact - s->last_x;
++        int rel_y = fby_exact - s->last_y;
++
++        if (rel_x != 0 || rel_y != 0) {
++            qemu_input_queue_rel(vc->gfx.dcl.con, INPUT_AXIS_X, rel_x);
++            qemu_input_queue_rel(vc->gfx.dcl.con, INPUT_AXIS_Y, rel_y);
++            qemu_input_event_sync();
++        }
++        s->last_x += rel_x;
++        s->last_y += rel_y;
++    } else {
++        s->last_x = fbx_exact;
++        s->last_y = fby_exact;
+     }
+-    s->last_x = fbx;
+-    s->last_y = fby;
+     s->last_set = TRUE;
+ 
+     if (!qemu_input_is_absolute(vc->gfx.dcl.con) && s->ptr_owner == vc) {
+-- 
+2.53.0
+

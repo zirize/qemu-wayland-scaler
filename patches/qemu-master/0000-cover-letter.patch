@@ -1,0 +1,77 @@
+From 33e8fe7667e93dfd2a7cde8a36a309803271ab46 Mon Sep 17 00:00:00 2001
+From: zirize <zirize@gmail.com>
+Date: Wed, 16 Sep 2026 04:58:13 +0900
+Subject: [PATCH 0/5] ui: fix relative pointer motion, and add a scaler option for SDL
+
+The first four patches are fixes for things I ran into running a Mac OS 9
+guest (relative pointer only, no absolute tablet) on a KDE/Wayland host.
+The last one adds a feature that depends on the third.
+
+Patches 1 and 4 are the same bug in two places. Both frontends scale the
+relative motion down to guest coordinates and truncate the result to an
+integer, so the fraction is dropped on every event instead of being
+accumulated. Whenever the window is larger than the guest the factor is
+below one, and a slow movement of the mouse produces a delta of zero over
+and over: the guest pointer does not move at all until the mouse is moved
+fast enough, which reads as a broken acceleration curve. Over a longer
+movement the discarded fractions add up and the pointer falls short of
+where it should be. Both patches keep the remainder and fold it into the
+next event.
+
+Patch 2 stops ui/gtk from recording itself as the pointer owner when
+gdk_seat_grab() has failed. The return value is currently discarded and
+ptr_owner is set unconditionally, so a failed grab leaves QEMU feeding
+relative motion to the guest while the host pointer is free to wander
+over other windows, with nothing to indicate why the two cursors have
+come apart.
+
+Patch 3 asks SDL for the output's real pixel density. Without
+SDL_WINDOW_ALLOW_HIGHDPI the window is only drawn at its logical size and
+a compositor at a fractional scale resamples it with its own filter, so
+the guest comes out bilinear-blurred whatever filtering QEMU picked. On a
+1.45x display here the difference is plain: measured against the guest
+framebuffer, the window content matches a bilinear upscale before the
+patch and a nearest one after it.
+
+Patch 5 then adds scaler=linear|nearest|integer|integerplus to the SDL
+display. nearest and linear pick the filter; integer scales by a whole
+number and letterboxes the rest so no guest pixel is wider than another;
+integerplus scales by a whole number into a render target and stretches
+that to the window, filling it without the uneven pixels of plain nearest
+neighbour.
+
+integer and integerplus allow the window to fall a couple of pixels short
+of a whole multiple before giving up on it. That is not slack for its own
+sake: a fractional-scale compositor rounds the surface to whole physical
+pixels, so a window sized to be exactly N times the guest can come back a
+pixel short, and taking the floor there drops a whole step - 2x becomes
+1x and half the window turns into border. Within that tolerance
+integerplus also skips its second pass entirely, since resampling by one
+pixel is all blur and no gain.
+
+The option is on DisplayOptions rather than DisplaySDL so the other
+backends can implement it too - ui/gtk would be the obvious next one.
+
+Tested on Ubuntu 26.04, KDE Plasma on Wayland at a 1.45 scale, SDL
+2.32.10, with a mac99 Mac OS 9.2.2 guest and a q35 Windows guest.
+
+zirize (5):
+  ui/gtk: keep the fraction when scaling relative motion
+  ui/gtk: do not take ownership of the pointer if the grab failed
+  ui/sdl: render at the output's pixel density
+  ui/sdl: keep the fraction when scaling relative motion
+  ui: add a scaler option for the SDL display
+
+ include/ui/gtk.h  |   4 +-
+ include/ui/sdl2.h |   5 ++
+ qapi/ui.json      |  31 ++++++++-
+ qemu-options.hx   |  10 +++
+ ui/gtk.c          |  57 ++++++++++++----
+ ui/sdl2-2d.c      | 164 +++++++++++++++++++++++++++++++++++++++++++++-
+ ui/sdl2-gl.c      |  12 +++-
+ ui/sdl2.c         |  27 +++++++-
+ 8 files changed, 287 insertions(+), 23 deletions(-)
+
+-- 
+2.53.0
+

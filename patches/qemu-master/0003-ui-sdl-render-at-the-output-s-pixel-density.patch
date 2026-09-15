@@ -1,0 +1,82 @@
+From be614ea747140d08045a955b79eb441e7b78f3df Mon Sep 17 00:00:00 2001
+From: zirize <zirize@gmail.com>
+Date: Wed, 16 Sep 2026 04:06:02 +0900
+Subject: [PATCH 3/5] ui/sdl: render at the output's pixel density
+
+The window is created without SDL_WINDOW_ALLOW_HIGHDPI, so SDL only ever
+draws it at its logical size. On a compositor running at a fractional
+scale the result is then resampled to physical pixels by the compositor,
+with its own filter, which undoes whatever scaling mode was chosen here:
+on a display at 1.45x the guest comes out visibly bilinear-blurred even
+though the texture is sampled nearest.
+
+Ask for the real pixel density so the window is drawn at the size it is
+actually presented at and the compositor has nothing left to resample.
+
+Once that is asked for, the drawable and the window are no longer the
+same size and the GL paths have to say which one they mean. They set the
+viewport from the window size, which would then cover only part of the
+framebuffer - and since GL counts from the bottom left, the guest would
+be drawn small in that corner. Take the drawable size there instead. The
+2D path already asks the renderer for its output size, which is in
+pixels, and the motion handler wants window coordinates, so both stay as
+they are.
+
+Signed-off-by: zirize <zirize@gmail.com>
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+---
+ ui/sdl2-gl.c | 12 ++++++++++--
+ ui/sdl2.c    |  7 +++++++
+ 2 files changed, 17 insertions(+), 2 deletions(-)
+
+diff --git a/ui/sdl2-gl.c b/ui/sdl2-gl.c
+index f41fc8bb96..27eff993c0 100644
+--- a/ui/sdl2-gl.c
++++ b/ui/sdl2-gl.c
+@@ -54,7 +54,15 @@ static void sdl2_gl_render_surface(struct sdl2_console *scon)
+ 
+     SDL_GL_MakeCurrent(scon->real_window, scon->winctx);
+ 
+-    SDL_GetWindowSize(scon->real_window, &ww, &wh);
++    /*
++     * The GL framebuffer is the size of the drawable, which is not the size
++     * of the window once the window has been created with ALLOW_HIGHDPI and
++     * the output runs at a scale other than one. Asking for the window size
++     * here would leave the viewport covering only part of the framebuffer,
++     * and since GL counts from the bottom left that is where the guest would
++     * end up.
++     */
++    SDL_GL_GetDrawableSize(scon->real_window, &ww, &wh);
+     surface_gl_setup_viewport(scon->gls, scon->surface, ww, wh);
+ 
+     surface_gl_render_texture(scon->gls, scon->surface);
+@@ -247,7 +255,7 @@ void sdl2_gl_scanout_flush(DisplayChangeListener *dcl,
+ 
+     SDL_GL_MakeCurrent(scon->real_window, scon->winctx);
+ 
+-    SDL_GetWindowSize(scon->real_window, &ww, &wh);
++    SDL_GL_GetDrawableSize(scon->real_window, &ww, &wh);
+     egl_fb_setup_default(&scon->win_fb, ww, wh, 0, 0);
+     egl_fb_blit(&scon->win_fb, &scon->guest_fb, !scon->y0_top);
+ 
+diff --git a/ui/sdl2.c b/ui/sdl2.c
+index 1c97d23a47..17c3dcee71 100644
+--- a/ui/sdl2.c
++++ b/ui/sdl2.c
+@@ -94,6 +94,13 @@ void sdl2_window_create(struct sdl2_console *scon)
+     } else {
+         flags |= SDL_WINDOW_RESIZABLE;
+     }
++    /*
++     * Render at the output's real pixel density. Without this the window is
++     * only ever drawn at its logical size, and a compositor running at a
++     * fractional scale resamples the result to physical pixels with its own
++     * (bilinear) filter, undoing whatever scaling mode was picked here.
++     */
++    flags |= SDL_WINDOW_ALLOW_HIGHDPI;
+     if (scon->hidden) {
+         flags |= SDL_WINDOW_HIDDEN;
+     }
+-- 
+2.53.0
+

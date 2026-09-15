@@ -1,0 +1,72 @@
+From 4f32fbe0ea960e472093e8fcb1c97d27d7b2766d Mon Sep 17 00:00:00 2001
+From: zirize <zirize@gmail.com>
+Date: Wed, 16 Sep 2026 04:05:45 +0900
+Subject: [PATCH 2/5] ui/gtk: do not take ownership of the pointer if the grab
+ failed
+
+gd_grab_update() throws away the GdkGrabStatus that gdk_seat_grab()
+returns, and gd_grab_pointer() sets s->ptr_owner unconditionally right
+after calling it. If the grab does not succeed - another client holds
+one, the window is not viewable yet, the seat is frozen - QEMU still
+believes it owns the pointer and keeps feeding relative motion to the
+guest while the host pointer moves freely over other windows, so the two
+cursors end up at unrelated positions with no way to tell why.
+
+Propagate the status and leave ptr_owner alone when the grab fails.
+
+Signed-off-by: zirize <zirize@gmail.com>
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+---
+ ui/gtk.c | 21 +++++++++++++++------
+ 1 file changed, 15 insertions(+), 6 deletions(-)
+
+diff --git a/ui/gtk.c b/ui/gtk.c
+index 529fb72792..238bd61603 100644
+--- a/ui/gtk.c
++++ b/ui/gtk.c
+@@ -1789,7 +1789,7 @@ static void gd_menu_zoom_fit(GtkMenuItem *item, void *opaque)
+     gd_update_full_redraw(vc);
+ }
+ 
+-static void gd_grab_update(VirtualConsole *vc, bool kbd, bool ptr)
++static bool gd_grab_update(VirtualConsole *vc, bool kbd, bool ptr)
+ {
+     GdkDisplay *display = gtk_widget_get_display(vc->gfx.drawing_area);
+     GdkSeat *seat = gdk_display_get_default_seat(display);
+@@ -1806,11 +1806,12 @@ static void gd_grab_update(VirtualConsole *vc, bool kbd, bool ptr)
+     }
+ 
+     if (caps) {
+-        gdk_seat_grab(seat, window, caps, false, cursor,
+-                      NULL, NULL, NULL);
+-    } else {
+-        gdk_seat_ungrab(seat);
++        return gdk_seat_grab(seat, window, caps, false, cursor,
++                             NULL, NULL, NULL) == GDK_GRAB_SUCCESS;
+     }
++
++    gdk_seat_ungrab(seat);
++    return true;
+ }
+ 
+ static void gd_grab_keyboard(VirtualConsole *vc, const char *reason)
+@@ -1857,7 +1858,15 @@ static void gd_grab_pointer(VirtualConsole *vc, const char *reason)
+         }
+     }
+ 
+-    gd_grab_update(vc, vc->s->kbd_owner == vc, true);
++    if (!gd_grab_update(vc, vc->s->kbd_owner == vc, true)) {
++        /*
++         * Without a grab the pointer keeps moving over other windows while
++         * the guest is fed relative motion, leaving the two cursors at
++         * unrelated positions. Better to stay ungrabbed than to pretend.
++         */
++        trace_gd_grab(vc->label, "ptr", "failed");
++        return;
++    }
+     gdk_device_get_position(gd_get_pointer(display),
+                             NULL, &vc->s->grab_x_root, &vc->s->grab_y_root);
+     vc->s->ptr_owner = vc;
+-- 
+2.53.0
+

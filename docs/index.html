@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>QEMU on Wayland: mouse dead zones, blurry scaling, and integer scaling</title>
+<meta name="description" content="Why the QEMU guest mouse drifts or freezes on Wayland/KDE, why the display is blurry under fractional display scaling, and patches adding integer scaling to the QEMU SDL display." />
+<meta name="author" content="zirize" />
+<meta name="robots" content="index, follow" />
+<link rel="canonical" href="https://zirize.github.io/qemu-wayland-scaler/" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://zirize.github.io/qemu-wayland-scaler/" />
+<meta property="og:title" content="QEMU on Wayland: mouse dead zones, blurry scaling, and integer scaling" />
+<meta property="og:description" content="Root causes and patches for QEMU relative mouse motion on Wayland, fractional-scaling blur, and pixel-perfect integer scaling." />
+<meta name="twitter:card" content="summary" />
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "QEMU on Wayland: mouse dead zones, blurry scaling, and integer scaling",
+  "description": "Root causes and patches for QEMU relative mouse motion on Wayland/KDE, fractional display scaling blur, and pixel-perfect integer scaling for the SDL display.",
+  "url": "https://zirize.github.io/qemu-wayland-scaler/",
+  "author": { "@type": "Person", "name": "zirize", "url": "https://github.com/zirize" },
+  "about": ["QEMU", "Wayland", "KDE Plasma", "SDL2", "integer scaling", "HiDPI"]
+}
+</script>
+<style>
+:root{--bg:#0f1117;--surface:#1a1d27;--border:#2d3148;--accent:#7c6af7;--accent2:#56c8a0;--text:#e2e4ef;--muted:#8b90b0;--radius:10px}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);line-height:1.7;font-size:16px;min-height:100vh;display:flex;flex-direction:column}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+header{background:linear-gradient(135deg,#1a1d27 0%,#12141e 100%);border-bottom:1px solid var(--border);padding:56px 20px 44px;text-align:center}
+header h1{font-size:clamp(1.6rem,4vw,2.4rem);font-weight:700;background:linear-gradient(90deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;margin-bottom:12px}
+header p{font-size:1.05rem;color:var(--muted);max-width:620px;margin:0 auto 22px}
+.btns{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+.btns a{display:inline-flex;align-items:center;gap:6px;padding:8px 18px;border-radius:var(--radius);background:var(--surface);border:1px solid var(--border);color:var(--text);font-size:.9rem;font-weight:500}
+.btns a:hover{text-decoration:none;border-color:var(--accent)}
+.btns a.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+main{max-width:820px;margin:0 auto;padding:48px 20px;flex:1}
+h2{font-size:1.35rem;margin:44px 0 14px;color:var(--text)}
+h2:first-child{margin-top:0}
+h3{font-size:1.05rem;margin:28px 0 10px;color:var(--accent2)}
+p{margin-bottom:14px;color:var(--text)}
+ul,ol{margin:0 0 16px 22px}
+li{margin-bottom:8px}
+code{font-family:ui-monospace,'Cascadia Code',Menlo,monospace;font-size:.88em;background:#12141e;border:1px solid var(--border);border-radius:5px;padding:1px 6px}
+pre{background:#12141e;border:1px solid var(--border);border-radius:var(--radius);padding:16px;overflow-x:auto;margin-bottom:16px}
+pre code{background:none;border:none;padding:0;font-size:.85rem;line-height:1.6}
+table{width:100%;border-collapse:collapse;margin-bottom:18px;font-size:.92rem}
+th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--border);vertical-align:top}
+th{color:var(--muted);font-weight:600;font-size:.82rem;text-transform:uppercase;letter-spacing:.5px}
+.symptoms{background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--accent2);border-radius:var(--radius);padding:20px 24px 8px;margin-bottom:8px}
+.note{background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:var(--radius);padding:14px 18px;margin-bottom:16px;font-size:.93rem;color:var(--muted)}
+.note strong{color:var(--text)}
+footer{text-align:center;padding:32px 20px;border-top:1px solid var(--border);color:var(--muted);font-size:.85rem}
+</style>
+</head>
+<body>
+<header>
+  <h1>QEMU on Wayland: mouse fixes and integer scaling</h1>
+  <p>Why the guest mouse drifts or hits an invisible dead zone, why the display comes out blurry under fractional display scaling, and how to get pixel-perfect integer scaling.</p>
+  <div class="btns">
+    <a class="primary" href="https://github.com/zirize/qemu-wayland-scaler">Patches on GitHub</a>
+    <a href="https://github.com/zirize/qemu/tree/ui-scaler-and-motion-fixes">Branch (QEMU master)</a>
+  </div>
+</header>
+<main>
+
+<div class="symptoms">
+<p>If you landed here from a search engine, one of these is probably your problem:</p>
+<ul>
+<li>The guest mouse pointer <strong>drifts away from the host pointer</strong>, or the guest cursor <strong>stops at an invisible edge</strong> inside the QEMU window — a dead zone — with <code>-display gtk</code> on Wayland or XWayland.</li>
+<li>Moving the mouse <strong>slowly does nothing</strong>; the guest pointer only starts moving once you move fast. It reads like a badly tuned acceleration curve.</li>
+<li>The guest display is <strong>blurry and bilinear-filtered</strong> even at an exact 2x or 3x zoom, on a desktop using <strong>fractional display scaling</strong> (125%, 145%, 150%…).</li>
+<li>You want <strong>pixel-perfect integer scaling</strong> for a low-resolution guest — Mac OS 9, Windows 98, DOS — and QEMU only offers a bilinear stretch.</li>
+</ul>
+</div>
+
+<h2>1. The GTK display cannot hold the pointer on Wayland</h2>
+
+<p>QEMU's GTK frontend emulates a relative-motion mouse: it grabs the pointer, takes the difference between consecutive absolute positions, and warps the pointer back to the middle when it approaches an edge. Two things go wrong on Wayland.</p>
+
+<p><code>gdk_seat_grab()</code> has no <code>confine_to</code> argument, so the pointer is never actually confined to the window. Under XWayland, X11 pointer grabs stop delivering motion once the pointer leaves the surface, so the guest cursor simply freezes — at a different place every time, because the motion is relative.</p>
+
+<p>And the re-centering check in <code>gd_motion_event()</code> is written against the <strong>monitor</strong> geometry rather than the widget. With the guest in a window on a 3840x2160 screen it never fires at all. Instrumented here: 306 checks, 0 hits, 0 warps.</p>
+
+<p>This is a known structural problem, not a small bug. The QEMU maintainer called the approach <a href="https://lists.gnu.org/archive/html/qemu-devel/2022-01/msg05940.html">&ldquo;clunky at best&rdquo;</a> and recommended using the low-level Wayland protocols instead; KDE filed the same symptom as <a href="https://bugs.kde.org/show_bug.cgi?id=450818">bug 450818</a> and closed it as a compositor-side matter.</p>
+
+<div class="note"><strong>The fix is to stop using the GTK display.</strong> <code>-display sdl</code> uses SDL2's native <code>pointer-constraints</code> and <code>relative-pointer</code> support and behaves correctly on Wayland. No patch can reasonably rescue the GTK path here.</div>
+
+<p>One real GTK bug is patched anyway: <code>gd_grab_update()</code> discards the <code>GdkGrabStatus</code> that <code>gdk_seat_grab()</code> returns, and <code>gd_grab_pointer()</code> sets <code>ptr_owner</code> unconditionally right after. A failed grab therefore leaves QEMU feeding relative motion to the guest while the host pointer roams freely over other windows, with nothing to indicate why the two cursors came apart.</p>
+
+<h2>2. The fraction of scaled relative motion is thrown away</h2>
+
+<p>Both <code>ui/gtk.c</code> and <code>ui/sdl2.c</code> scale relative motion from window coordinates into guest pixels and store the result in an <code>int</code>. When the window is larger than the guest — zoom-to-fit, or any manual enlargement — that factor is below one. A one-pixel movement of the mouse becomes zero, on every event.</p>
+
+<p>So the guest pointer stands still while you move the mouse slowly, and falls short of the distance actually travelled when you move it fast. Truncation is toward zero, so left and up lose the fraction differently from right and down, and the pointer drifts. At 1360x768 in a 1876-wide window the factor is 0.72.</p>
+
+<p>The fix is to keep the remainder and fold it into the next event.</p>
+
+<h2>3. Fractional display scaling silently undoes your filter choice</h2>
+
+<p>QEMU's SDL window is created without <code>SDL_WINDOW_ALLOW_HIGHDPI</code>, so SDL only ever draws it at its <em>logical</em> size. On a compositor running at a fractional scale, the compositor then resamples that up to physical pixels using its own filter — which destroys whatever scaling mode QEMU chose.</p>
+
+<p>On a display at 1.45x, measured against the guest framebuffer: the window content matches a <strong>bilinear</strong> upscale before the patch and a <strong>nearest</strong> one after it. Fraction of adjacent identical pixels: 88.9% before, 97.5% after.</p>
+
+<p>Asking for the real pixel density has a consequence. The drawable and the window are no longer the same size, and the GL paths in <code>ui/sdl2-gl.c</code> set the viewport from the window size. Since GL counts from the bottom left, that draws the guest small in that corner. The patch takes the drawable size there instead.</p>
+
+<h2>4. The scaler option</h2>
+
+<p>The last patch adds <code>scaler=</code> to the SDL display:</p>
+
+<pre><code>qemu-system-ppc  -display sdl,scaler=integerplus  ...
+qemu-system-i386 -display sdl,scaler=integer      ...</code></pre>
+
+<table>
+<tr><th>mode</th><th>behaviour</th></tr>
+<tr><td><code>linear</code></td><td>the existing bilinear stretch (default)</td></tr>
+<tr><td><code>nearest</code></td><td>nearest-neighbour; sharp, but some guest pixels end up wider than others</td></tr>
+<tr><td><code>integer</code></td><td>scale by the largest whole number that fits and letterbox the rest, so every guest pixel is the same size</td></tr>
+<tr><td><code>integerplus</code></td><td>scale by a whole number into a render target with no interpolation, then stretch that to fill the window</td></tr>
+</table>
+
+<p><code>integer</code> and <code>integerplus</code> tolerate the window falling up to two pixels short of a whole multiple. That is not arbitrary slack: a fractional-scale compositor rounds the surface to whole physical pixels, so a window sized to be exactly N times the guest comes back a pixel short — and taking the <code>floor()</code> there drops a whole step, turning 2x into 1x and half the window into border. Measured here, a 3x request of 2400x1800 became 1655x1241 logical and came back as 2400x<strong>1799</strong>.</p>
+
+<p>The option is defined on <code>DisplayOptions</code> rather than <code>DisplaySDL</code>, so other display backends can implement it too.</p>
+
+<div class="note"><strong>The GL path does not implement the scaler.</strong> With <code>gl=on</code> the guest is stretched over the window with a plain bilinear filter regardless of <code>scaler=</code>. Use the default 2D path.</div>
+
+<h2>The patches</h2>
+
+<p>Five commits, each building on its own and checkpatch-clean. Two series, the same changes against two bases:</p>
+
+<ul>
+<li><a href="https://github.com/zirize/qemu-wayland-scaler/tree/main/patches/qemu-master">QEMU master (11.1.50)</a>, with a cover letter — branch <a href="https://github.com/zirize/qemu/tree/ui-scaler-and-motion-fixes"><code>ui-scaler-and-motion-fixes</code></a></li>
+<li><a href="https://github.com/zirize/qemu-wayland-scaler/tree/main/patches/qemu-screamer-10.2.0">mcayland/qemu <code>screamer-v10.2.0</code></a>, the Mac OS 9 / PowerPC audio fork rebased on QEMU 10.2.0 — branch <a href="https://github.com/zirize/qemu/tree/screamer-ui-scaler-and-motion-fixes"><code>screamer-ui-scaler-and-motion-fixes</code></a></li>
+</ul>
+
+<pre><code>git am /path/to/patches/qemu-master/00*.patch</code></pre>
+
+<pre><code>ui/gtk: keep the fraction when scaling relative motion
+ui/gtk: do not take ownership of the pointer if the grab failed
+ui/sdl: render at the output's pixel density
+ui/sdl: keep the fraction when scaling relative motion
+ui: add a scaler option for the SDL display</code></pre>
+
+<h2>Tested on</h2>
+
+<p>Ubuntu 26.04, KDE Plasma on Wayland at 1.45 display scale, SDL 2.32.10, with a <code>mac99</code> Mac OS 9.2.2 guest and <code>q35</code> Windows XP and Windows 98 SE guests.</p>
+
+<p>Not submitted upstream. Offered as-is for anyone hitting the same problems. The patches are against QEMU and carry QEMU's licence (GPLv2).</p>
+
+</main>
+<footer>
+  <p>Made by <a href="https://github.com/zirize">zirize</a> &middot; <a href="https://zirize.github.io/">More projects</a></p>
+</footer>
+</body>
+</html>
