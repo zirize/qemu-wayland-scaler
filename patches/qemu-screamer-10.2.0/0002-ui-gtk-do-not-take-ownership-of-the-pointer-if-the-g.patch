@@ -1,7 +1,7 @@
 From deafb128b88bcc9fcc7c78d5134ab2de8b3b8243 Mon Sep 17 00:00:00 2001
 From: zirize <zirize@gmail.com>
 Date: Wed, 16 Sep 2026 04:05:45 +0900
-Subject: [PATCH 2/5] ui/gtk: do not take ownership of the pointer if the grab
+Subject: [PATCH 2/6] ui/gtk: do not take ownership of the pointer if the grab
  failed
 
 gd_grab_update() throws away the GdkGrabStatus that gdk_seat_grab()

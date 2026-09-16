@@ -1,8 +1,9 @@
 # QEMU on Wayland: mouse fixes and integer scaling
 
 Patches for QEMU that fix **relative mouse motion** and **blurry display output**
-on a Wayland compositor (tested on KDE Plasma), and add an **integer scaling**
-option to the SDL display.
+on a Wayland compositor (tested on KDE Plasma), add an **integer scaling**
+option to the SDL display, and make the emulated PS/2 mouse honour the
+**sample rate the guest asked for**.
 
 If you landed here from a search engine, one of these is probably your problem:
 
@@ -16,8 +17,11 @@ If you landed here from a search engine, one of these is probably your problem:
   scaling** (125%, 145%, 150%…).
 - You want **pixel-perfect integer scaling** for an old low-resolution guest
   (Mac OS 9, Windows 98, DOS) and QEMU only offers a bilinear stretch.
+- The mouse in a **Windows XP** (or other Windows) guest **crawls**, and the
+  lower the guest resolution the worse it gets — while the same host mouse is
+  fine in a Linux or Mac OS 9 guest.
 
-There are five patches. Four are bug fixes, one is a new option.
+There are six patches. Five are bug fixes, one is a new option.
 
 ## The problems, and what actually causes them
 
@@ -104,6 +108,30 @@ display backends can implement it too.
 **The GL path (`gl=on`) does not implement the scaler.** It renders a plain
 bilinear stretch over the whole window. Use the default 2D path for the scaler.
 
+### 5. The PS/2 mouse ignores the sample rate the guest selected
+
+A PS/2 mouse is sampled at a fixed rate and the guest picks that rate with
+`AUX_SET_SAMPLE`. QEMU records the value and then ignores it: every host
+pointer event is turned into a packet and sent straight away.
+
+Host pointing devices report far faster than any PS/2 mouse — 1000Hz is common
+on a gaming mouse, and on one here 84% of the events carry a total movement of
+two counts or less. A guest that only looks at the deltas does not care, because
+the counts still add up. A guest that derives the pointer *speed* from the counts
+in a single packet does. Windows' "enhance pointer precision" is exactly that: a
+guest that asked for 100 samples a second and instead gets 1000 packets of one
+count each reads that as the slowest possible movement and keeps the pointer at
+the bottom of its acceleration curve.
+
+Patch 6 accumulates the motion and releases it at the interval the guest asked
+for, which is what the hardware would have done. Button changes are not delayed,
+a sample rate of zero still passes everything through, and remote (polled) mode
+is untouched. Measured on a Windows XP guest: packets drop from ~1000/s to a
+96/s ceiling, and the mean counts per packet go from ~1 to 7.55.
+
+Mac OS 9 is unaffected because ADB is polled by the guest, so QEMU already
+accumulates motion between polls.
+
 ## Usage
 
 ```
@@ -113,7 +141,7 @@ qemu-system-i386 -display sdl,scaler=integer      ...
 
 ## The patches
 
-Both series are the same five commits, `Signed-off-by` and checkpatch-clean,
+Both series are the same six commits, `Signed-off-by` and checkpatch-clean,
 each one building on its own.
 
 - [`patches/qemu-master/`](patches/qemu-master/) — against QEMU master (11.1.50),
@@ -134,9 +162,14 @@ The commits:
 ui/gtk: keep the fraction when scaling relative motion
 ui/gtk: do not take ownership of the pointer if the grab failed
 ui/sdl: render at the output's pixel density
-ui/sdl: keep the fraction when scaling relative motion
+ui/sdl: do not scale relative pointer motion
 ui: add a scaler option for the SDL display
+hw/input/ps2: send packets at the sample rate the guest asked for
 ```
+
+The last one is independent of the display work and touches `hw/input` rather
+than `ui/`; it is kept in the same series only because it came out of chasing
+the same "the mouse feels wrong" report.
 
 ## Tested on
 

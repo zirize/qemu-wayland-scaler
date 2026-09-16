@@ -1,7 +1,7 @@
-From 33e8fe7667e93dfd2a7cde8a36a309803271ab46 Mon Sep 17 00:00:00 2001
+From b07e33a04b83ba1e9ae343e30f3866925d679e46 Mon Sep 17 00:00:00 2001
 From: zirize <zirize@gmail.com>
 Date: Wed, 16 Sep 2026 04:06:30 +0900
-Subject: [PATCH 5/5] ui: add a scaler option for the SDL display
+Subject: [PATCH 5/6] ui: add a scaler option for the SDL display
 
 The guest display is always stretched to the window with a bilinear
 filter, which is a poor fit for the low resolution guests SDL tends to be
@@ -30,7 +30,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
  4 files changed, 204 insertions(+), 4 deletions(-)
 
 diff --git a/include/ui/sdl2.h b/include/ui/sdl2.h
-index d509adc6eb..d4da8145c1 100644
+index 9daf5ecffa..896eeb5e3d 100644
 --- a/include/ui/sdl2.h
 +++ b/include/ui/sdl2.h
 @@ -32,6 +32,9 @@ struct sdl2_console {
@@ -40,9 +40,9 @@ index d509adc6eb..d4da8145c1 100644
 +    /* intermediate render target used by DISPLAY_SCALER_INTEGERPLUS */
 +    SDL_Texture *scaler_target;
 +    int scaler_target_w, scaler_target_h;
-     /* sub-pixel remainder of relative motion not yet sent to the guest */
-     double rel_rem_x, rel_rem_y;
      SDL_Window *real_window;
+     SDL_Renderer *real_renderer;
+     int idx;
 diff --git a/qapi/ui.json b/qapi/ui.json
 index b2c42a7f57..4b9c7e83fa 100644
 --- a/qapi/ui.json

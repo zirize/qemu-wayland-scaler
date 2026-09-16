@@ -1,7 +1,7 @@
 From e6477c82fdcb14d97990d91da716a508d0a6a27a Mon Sep 17 00:00:00 2001
 From: zirize <zirize@gmail.com>
 Date: Wed, 16 Sep 2026 04:05:45 +0900
-Subject: [PATCH 1/5] ui/gtk: keep the fraction when scaling relative motion
+Subject: [PATCH 1/6] ui/gtk: keep the fraction when scaling relative motion
 
 gd_motion_event() converts the pointer position from widget to guest
 coordinates by dividing by gfx.scale_x/scale_y, and stores the result in

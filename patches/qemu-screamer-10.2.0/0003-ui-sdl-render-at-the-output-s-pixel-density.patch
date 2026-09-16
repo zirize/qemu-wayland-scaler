@@ -1,7 +1,7 @@
 From 8333a032853b83a015199405d02d36b8918a0293 Mon Sep 17 00:00:00 2001
 From: zirize <zirize@gmail.com>
 Date: Wed, 16 Sep 2026 04:06:02 +0900
-Subject: [PATCH 3/5] ui/sdl: render at the output's pixel density
+Subject: [PATCH 3/6] ui/sdl: render at the output's pixel density
 
 The window is created without SDL_WINDOW_ALLOW_HIGHDPI, so SDL only ever
 draws it at its logical size. On a compositor running at a fractional
