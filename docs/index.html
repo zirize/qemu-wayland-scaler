@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>QEMU on Wayland: mouse dead zones, blurry scaling, and integer scaling</title>
-<meta name="description" content="Why the QEMU guest mouse drifts or freezes on Wayland/KDE, why the display is blurry under fractional display scaling, and patches adding integer scaling to the QEMU SDL display." />
+<title>QEMU on Wayland: mouse dead zones, slow Windows mouse, blurry scaling, and integer scaling</title>
+<meta name="description" content="Why the QEMU guest mouse drifts or freezes on Wayland/KDE, why the mouse crawls in a Windows XP guest, why the display is blurry under fractional display scaling, and patches adding integer scaling to the QEMU SDL display." />
 <meta name="author" content="zirize" />
 <meta name="robots" content="index, follow" />
 <link rel="canonical" href="https://zirize.github.io/qemu-wayland-scaler/" />
@@ -74,6 +74,7 @@ footer{text-align:center;padding:32px 20px;border-top:1px solid var(--border);co
 <li>Moving the mouse <strong>slowly does nothing</strong>; the guest pointer only starts moving once you move fast. It reads like a badly tuned acceleration curve.</li>
 <li>The guest display is <strong>blurry and bilinear-filtered</strong> even at an exact 2x or 3x zoom, on a desktop using <strong>fractional display scaling</strong> (125%, 145%, 150%…).</li>
 <li>You want <strong>pixel-perfect integer scaling</strong> for a low-resolution guest — Mac OS 9, Windows 98, DOS — and QEMU only offers a bilinear stretch.</li>
+<li>The mouse in a <strong>Windows XP guest crawls</strong>, and the lower the guest resolution the worse it gets — while the same host mouse behaves normally in a Linux or Mac OS 9 guest.</li>
 </ul>
 </div>
 
@@ -97,7 +98,9 @@ footer{text-align:center;padding:32px 20px;border-top:1px solid var(--border);co
 
 <p>So the guest pointer stands still while you move the mouse slowly, and falls short of the distance actually travelled when you move it fast. Truncation is toward zero, so left and up lose the fraction differently from right and down, and the pointer drifts. At 1360x768 in a 1876-wide window the factor is 0.72.</p>
 
-<p>The fix is to keep the remainder and fold it into the next event.</p>
+<p>The two frontends are fixed differently. <code>ui/gtk.c</code> keeps the remainder and folds it into the next event. <code>ui/sdl2.c</code> stops scaling relative motion at all: a position is a point on the screen and has to be expressed in guest pixels, but relative motion is what the mouse reports and does not depend on the resolution the guest happens to be in. Dividing it by the window-to-guest ratio — which commit <code>30aa105640</code> started doing, in a patch whose subject and body are about positions — means the mouse has to travel N times as far at an Nx zoom.</p>
+
+<p>That leaves the two frontends inconsistent, which is deliberate: <code>ui/gtk.c</code> derives relative motion from consecutive absolute positions, so removing the scaling there means keeping the delta in widget coordinates. That is a larger change and is not attempted here.</p>
 
 <h2>3. Fractional display scaling silently undoes your filter choice</h2>
 
@@ -128,9 +131,19 @@ qemu-system-i386 -display sdl,scaler=integer      ...</code></pre>
 
 <div class="note"><strong>The GL path does not implement the scaler.</strong> With <code>gl=on</code> the guest is stretched over the window with a plain bilinear filter regardless of <code>scaler=</code>. Use the default 2D path.</div>
 
+<h2>5. The PS/2 mouse ignores the sample rate the guest selected</h2>
+
+<p>A PS/2 mouse is sampled at a fixed rate, and the guest picks that rate with <code>AUX_SET_SAMPLE</code>. QEMU records the value and then ignores it: every host pointer event is turned into a packet and sent straight away.</p>
+
+<p>Host pointing devices report far faster than any PS/2 mouse. 1000Hz is common on a gaming mouse, and on one here 84% of the events carry a total movement of two counts or less. A guest that only looks at the deltas does not care, because the counts still add up. A guest that derives the pointer <em>speed</em> from the counts in a single packet does. Windows' "enhance pointer precision" is exactly that: a guest that asked for 100 samples a second and instead gets 1000 packets of one count each reads that as the slowest possible movement, and keeps the pointer at the bottom of its acceleration curve. The pointer crawls, and the lower the guest resolution the worse it looks.</p>
+
+<p>The fix accumulates the motion and releases it at the interval the guest asked for, which is what the hardware would have done. Button changes are not delayed, a sample rate of zero — nothing asked for yet — still passes everything through, and remote (polled) mode is untouched.</p>
+
+<p>Measured on a Windows XP guest: packets drop from around 1000/s to a 96/s ceiling, and the mean counts per packet go from about 1 to 7.55. Mac OS 9 is unaffected, because ADB is polled by the guest and QEMU already accumulates motion between polls.</p>
+
 <h2>The patches</h2>
 
-<p>Five commits, each building on its own and checkpatch-clean. Two series, the same changes against two bases:</p>
+<p>Six commits, each building on its own and checkpatch-clean. Two series, the same changes against two bases:</p>
 
 <ul>
 <li><a href="https://github.com/zirize/qemu-wayland-scaler/tree/main/patches/qemu-master">QEMU master (11.1.50)</a>, with a cover letter — branch <a href="https://github.com/zirize/qemu/tree/ui-scaler-and-motion-fixes"><code>ui-scaler-and-motion-fixes</code></a></li>
@@ -142,8 +155,11 @@ qemu-system-i386 -display sdl,scaler=integer      ...</code></pre>
 <pre><code>ui/gtk: keep the fraction when scaling relative motion
 ui/gtk: do not take ownership of the pointer if the grab failed
 ui/sdl: render at the output's pixel density
-ui/sdl: keep the fraction when scaling relative motion
-ui: add a scaler option for the SDL display</code></pre>
+ui/sdl: do not scale relative pointer motion
+ui: add a scaler option for the SDL display
+hw/input/ps2: send packets at the sample rate the guest asked for</code></pre>
+
+<p>The last one is independent of the display work and touches <code>hw/input</code> rather than <code>ui/</code>. It is kept in the same series only because it came out of chasing the same "the mouse feels wrong" report.</p>
 
 <h2>Tested on</h2>
 
