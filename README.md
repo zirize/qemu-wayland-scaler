@@ -1,5 +1,7 @@
 # QEMU on Wayland: mouse fixes and integer scaling
 
+📄 Project page: **[QEMU on Wayland: mouse dead zones, slow Windows mouse, blurry scaling, and integer scaling](https://zirize.github.io/qemu-wayland-scaler/)** · More projects: **[zirize.github.io](https://zirize.github.io/)**
+
 Patches for QEMU that fix **relative mouse motion** and **blurry display output**
 on a Wayland compositor (tested on KDE Plasma), add an **integer scaling**
 option to the SDL display, and make the emulated PS/2 mouse honour the
