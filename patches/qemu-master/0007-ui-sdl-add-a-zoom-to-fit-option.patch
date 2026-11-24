@@ -1,0 +1,130 @@
+From 34d77c46f0426acc4b183c4bad45639c43dbbf35 Mon Sep 17 00:00:00 2001
+From: zirize <zirize@gmail.com>
+Date: Sun, 27 Sep 2026 02:08:50 +0900
+Subject: [PATCH 7/9] ui/sdl: add a zoom-to-fit option
+
+Whenever the guest changes resolution the SDL window is resized to the
+new surface size, undoing whatever size the user gave it. With a scaler
+that fits the guest into the window this is rarely wanted: a guest that
+boots through several modes ends up in a small 1:1 window each time.
+
+GTK and Cocoa already have zoom-to-fit for this, so add the same option
+to DisplaySDL. When it is on, the switch path no longer calls
+sdl2_window_resize() and the new resolution is scaled into the current
+window instead. Ctrl+Alt+0 still resizes the window to 1:1, since that
+is an explicit request.
+
+Signed-off-by: zirize <zirize@gmail.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ include/ui/sdl2.h | 1 +
+ qapi/ui.json      | 8 +++++++-
+ qemu-options.hx   | 6 +++++-
+ ui/sdl2-2d.c      | 2 +-
+ ui/sdl2-gl.c      | 2 +-
+ ui/sdl2.c         | 5 +++++
+ 6 files changed, 20 insertions(+), 4 deletions(-)
+
+diff --git a/include/ui/sdl2.h b/include/ui/sdl2.h
+index 896eeb5e3d..035d407c43 100644
+--- a/include/ui/sdl2.h
++++ b/include/ui/sdl2.h
+@@ -61,6 +61,7 @@ struct sdl2_console {
+ void sdl2_window_create(struct sdl2_console *scon);
+ void sdl2_window_destroy(struct sdl2_console *scon);
+ void sdl2_window_resize(struct sdl2_console *scon);
++bool sdl2_zoom_to_fit(struct sdl2_console *scon);
+ void sdl2_poll_events(struct sdl2_console *scon);
+ 
+ void sdl2_process_key(struct sdl2_console *scon,
+diff --git a/qapi/ui.json b/qapi/ui.json
+index 4b9c7e83fa..0daf8fa40b 100644
+--- a/qapi/ui.json
++++ b/qapi/ui.json
+@@ -1502,10 +1502,16 @@
+ # @grab-mod: Modifier keys that should be pressed together with the
+ #     "G" key to release the mouse grab.
+ #
++# @zoom-to-fit: Keep the window size when the guest changes
++#     resolution and scale the new resolution into it.  When turned
++#     off the window is resized to the new guest resolution.
++#     Defaults to "off".  (Since 11.1)
++#
+ # Since: 7.1
+ ##
+ { 'struct'  : 'DisplaySDL',
+-  'data'    : { '*grab-mod'   : 'HotKeyMod' } }
++  'data'    : { '*grab-mod'   : 'HotKeyMod',
++                '*zoom-to-fit': 'bool' } }
+ 
+ ##
+ # @DisplayType:
+diff --git a/qemu-options.hx b/qemu-options.hx
+index ed9baba55d..bcbb52b607 100644
+--- a/qemu-options.hx
++++ b/qemu-options.hx
+@@ -2252,7 +2252,7 @@ DEF("display", HAS_ARG, QEMU_OPTION_display,
+ #endif
+ #if defined(CONFIG_SDL)
+     "-display sdl[,gl=on|core|es|off][,grab-mod=<mod>][,show-cursor=on|off]\n"
+-    "            [,window-close=on|off]\n"
++    "            [,window-close=on|off][,zoom-to-fit=on|off]\n"
+     "            [,scaler=linear|nearest|integer|integerplus]\n"
+ #endif
+ #if defined(CONFIG_GTK)
+@@ -2338,6 +2338,10 @@ SRST
+ 
+         ``window-close=on|off`` : Allow to quit qemu with window close button
+ 
++        ``zoom-to-fit=on|off`` : Keep the window size when the guest
++        changes resolution instead of resizing the window to match it,
++        defaults to "off"
++
+         ``scaler=linear|nearest|integer|integerplus`` : Filter used when
+         the guest display is scaled to the window. ``linear`` (the default)
+         is smooth but blurry; ``nearest`` keeps edges sharp at the cost of
+diff --git a/ui/sdl2-2d.c b/ui/sdl2-2d.c
+index 36b19b2656..6e51a4bec1 100644
+--- a/ui/sdl2-2d.c
++++ b/ui/sdl2-2d.c
+@@ -222,7 +222,7 @@ void sdl2_2d_switch(DisplayChangeListener *dcl,
+ 
+     if (!scon->real_window) {
+         sdl2_window_create(scon);
+-    } else if (old_surface &&
++    } else if (old_surface && !sdl2_zoom_to_fit(scon) &&
+                ((surface_width(old_surface)  != surface_width(new_surface)) ||
+                 (surface_height(old_surface) != surface_height(new_surface)))) {
+         sdl2_window_resize(scon);
+diff --git a/ui/sdl2-gl.c b/ui/sdl2-gl.c
+index 27eff993c0..a26d739f6e 100644
+--- a/ui/sdl2-gl.c
++++ b/ui/sdl2-gl.c
+@@ -108,7 +108,7 @@ void sdl2_gl_switch(DisplayChangeListener *dcl,
+     if (!scon->real_window) {
+         sdl2_window_create(scon);
+         scon->gls = qemu_gl_init_shader();
+-    } else if (old_surface &&
++    } else if (old_surface && !sdl2_zoom_to_fit(scon) &&
+                ((surface_width(old_surface)  != surface_width(new_surface)) ||
+                 (surface_height(old_surface) != surface_height(new_surface)))) {
+         sdl2_window_resize(scon);
+diff --git a/ui/sdl2.c b/ui/sdl2.c
+index 66169b6e31..a1d5be2829 100644
+--- a/ui/sdl2.c
++++ b/ui/sdl2.c
+@@ -170,6 +170,11 @@ void sdl2_window_resize(struct sdl2_console *scon)
+                       surface_height(scon->surface));
+ }
+ 
++bool sdl2_zoom_to_fit(struct sdl2_console *scon)
++{
++    return scon->opts->u.sdl.has_zoom_to_fit && scon->opts->u.sdl.zoom_to_fit;
++}
++
+ static void sdl2_redraw(struct sdl2_console *scon)
+ {
+     if (scon->opengl) {
+-- 
+2.53.0
+

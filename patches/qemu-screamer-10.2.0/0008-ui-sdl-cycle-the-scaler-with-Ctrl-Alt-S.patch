@@ -1,0 +1,154 @@
+From f006ef38cd67974d00cb85dcc149282ebdc91c23 Mon Sep 17 00:00:00 2001
+From: zirize <zirize@gmail.com>
+Date: Tue, 24 Nov 2026 22:55:04 +0900
+Subject: [PATCH 8/9] ui/sdl: cycle the scaler with Ctrl+Alt+S
+
+The scaler= option is read once at start-up, so comparing the modes on a
+given guest means restarting it. Keep the current mode in the console,
+seeded from the option, and let the grab modifier plus S step through
+linear, nearest, integer and integerplus. The texture is re-created
+because its filter and the integerplus target depend on the mode.
+
+S is not used by the SDL or GTK hotkeys, and unlike F1-F12 or Backspace
+the guest has no common use for it together with Ctrl+Alt. The scaler is
+only implemented by the 2D renderer, so with gl=on the key still goes to
+the guest.
+
+The window title names the mode while it differs from the one QEMU was
+started with.
+
+Signed-off-by: zirize <zirize@gmail.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Q78o7VG6jAieKBpedzps5M
+---
+ docs/system/keys.rst.inc |  4 ++++
+ include/ui/sdl2.h        |  2 ++
+ qemu-options.hx          |  3 ++-
+ ui/sdl2-2d.c             |  5 +----
+ ui/sdl2.c                | 28 +++++++++++++++++++++++++---
+ 5 files changed, 34 insertions(+), 8 deletions(-)
+
+diff --git a/docs/system/keys.rst.inc b/docs/system/keys.rst.inc
+index 3b5307b775..665a6c6cec 100644
+--- a/docs/system/keys.rst.inc
++++ b/docs/system/keys.rst.inc
+@@ -24,6 +24,10 @@ while ``-display sdl,grab-mod=rctrl`` changes it to the right :kbd:`Ctrl` key.
+   * - :kbd:`Ctrl+Alt+0`
+     - Restore the screen's un-scaled dimensions
+ 
++  * - :kbd:`Ctrl+Alt+s`
++    - Cycle the display scaler (linear, nearest, integer, integerplus).
++      SDL 2D rendering only.
++
+   * - :kbd:`Ctrl+Alt+n`
+     - Switch to virtual console 'n'. Standard console mappings are:
+ 
+diff --git a/include/ui/sdl2.h b/include/ui/sdl2.h
+index efe3ab7bc6..d9c71fa8c7 100644
+--- a/include/ui/sdl2.h
++++ b/include/ui/sdl2.h
+@@ -31,6 +31,8 @@ struct sdl2_console {
+     DisplayChangeListener dcl;
+     DisplaySurface *surface;
+     DisplayOptions *opts;
++    /* current scaler; starts from opts->scaler, Ctrl+Alt+S cycles it */
++    DisplayScaler scaler;
+     SDL_Texture *texture;
+     /* intermediate render target used by DISPLAY_SCALER_INTEGERPLUS */
+     SDL_Texture *scaler_target;
+diff --git a/qemu-options.hx b/qemu-options.hx
+index 69c9e242ac..3570caf077 100644
+--- a/qemu-options.hx
++++ b/qemu-options.hx
+@@ -2218,7 +2218,8 @@ SRST
+         unevenly sized guest pixels; ``integer`` scales by a whole number
+         only and letterboxes the rest; ``integerplus`` scales by a whole
+         number first and then stretches the remainder, filling the window
+-        while staying sharper than ``linear``.
++        while staying sharper than ``linear``. Ctrl+Alt+S cycles through
++        the modes at run time.
+ 
+     ``gtk``
+         Display video output in a GTK window. This interface provides
+diff --git a/ui/sdl2-2d.c b/ui/sdl2-2d.c
+index 4e52cdee2d..0f35bc48e4 100644
+--- a/ui/sdl2-2d.c
++++ b/ui/sdl2-2d.c
+@@ -30,10 +30,7 @@
+ 
+ static DisplayScaler sdl2_2d_scaler(struct sdl2_console *scon)
+ {
+-    if (scon->opts->has_scaler) {
+-        return scon->opts->scaler;
+-    }
+-    return DISPLAY_SCALER_LINEAR;
++    return scon->scaler;
+ }
+ 
+ /*
+diff --git a/ui/sdl2.c b/ui/sdl2.c
+index 3d28f190ce..9bb646c7b5 100644
+--- a/ui/sdl2.c
++++ b/ui/sdl2.c
+@@ -179,6 +179,7 @@ static void sdl_update_caption(struct sdl2_console *scon)
+ {
+     char win_title[1024];
+     char icon_title[1024];
++    char scaler_status[64] = "";
+     const char *status = "";
+ 
+     if (!runstate_is_running()) {
+@@ -201,12 +202,20 @@ static void sdl_update_caption(struct sdl2_console *scon)
+         }
+     }
+ 
++    if (!scon->opengl && scon->opts &&
++        scon->scaler != (scon->opts->has_scaler ? scon->opts->scaler
++                                                : DISPLAY_SCALER_LINEAR)) {
++        snprintf(scaler_status, sizeof(scaler_status), " [scaler: %s]",
++                 DisplayScaler_str(scon->scaler));
++    }
++
+     if (qemu_name) {
+-        snprintf(win_title, sizeof(win_title), "QEMU (%s-%d)%s", qemu_name,
+-                 scon->idx, status);
++        snprintf(win_title, sizeof(win_title), "QEMU (%s-%d)%s%s", qemu_name,
++                 scon->idx, scaler_status, status);
+         snprintf(icon_title, sizeof(icon_title), "QEMU (%s)", qemu_name);
+     } else {
+-        snprintf(win_title, sizeof(win_title), "QEMU%s", status);
++        snprintf(win_title, sizeof(win_title), "QEMU%s%s", scaler_status,
++                 status);
+         snprintf(icon_title, sizeof(icon_title), "QEMU");
+     }
+ 
+@@ -433,6 +442,17 @@ static void handle_keydown(SDL_Event *ev)
+                 sdl_grab_end(scon);
+             }
+             break;
++        case SDL_SCANCODE_S:
++            /* The scaler is only implemented by the 2D renderer. */
++            if (scon->opengl || !scon->surface) {
++                break;
++            }
++            scon->scaler = (scon->scaler + 1) % DISPLAY_SCALER__MAX;
++            /* re-create the texture with the new filter and redraw */
++            sdl2_2d_switch(&scon->dcl, scon->surface);
++            sdl_update_caption(scon);
++            scon->gui_keysym = true;
++            break;
+         case SDL_SCANCODE_0:
+             sdl2_window_resize(scon);
+             if (!scon->opengl) {
+@@ -916,6 +936,8 @@ static void sdl2_display_init(DisplayState *ds, DisplayOptions *o)
+         }
+         sdl2_console[i].idx = i;
+         sdl2_console[i].opts = o;
++        sdl2_console[i].scaler = o->has_scaler ? o->scaler
++                                               : DISPLAY_SCALER_LINEAR;
+ #ifdef CONFIG_OPENGL
+         sdl2_console[i].opengl = display_opengl;
+         sdl2_console[i].dcl.ops = display_opengl ? &dcl_gl_ops : &dcl_2d_ops;
+-- 
+2.53.0
+

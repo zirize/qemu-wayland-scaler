@@ -1,7 +1,7 @@
 From a69629307133967f2a7886b9d7d507562981aa78 Mon Sep 17 00:00:00 2001
 From: zirize <zirize@gmail.com>
 Date: Wed, 16 Sep 2026 23:38:21 +0900
-Subject: [PATCH 6/6] hw/input/ps2: send packets at the sample rate the guest
+Subject: [PATCH 6/9] hw/input/ps2: send packets at the sample rate the guest
  asked for
 
 A PS/2 mouse is sampled at a fixed rate, and the guest picks that rate

@@ -1,29 +1,33 @@
-From 43922bf55e15ce6cc01a130b69c5ff4d192d59bf Mon Sep 17 00:00:00 2001
+From 49c12fc700c9a571b507ddb7ba4f6586d560379d Mon Sep 17 00:00:00 2001
 From: zirize <zirize@gmail.com>
-Date: Thu, 17 Sep 2026 01:01:50 +0900
-Subject: [PATCH 0/6] *** SUBJECT HERE ***
+Date: Tue, 24 Nov 2026 23:00:16 +0900
+Subject: [PATCH 0/9] *** SUBJECT HERE ***
 
 *** BLURB HERE ***
 
-zirize (6):
+zirize (9):
   ui/gtk: keep the fraction when scaling relative motion
   ui/gtk: do not take ownership of the pointer if the grab failed
   ui/sdl: render at the output's pixel density
   ui/sdl: do not scale relative pointer motion
   ui: add a scaler option for the SDL display
   hw/input/ps2: send packets at the sample rate the guest asked for
+  ui/sdl: add a zoom-to-fit option
+  ui/sdl: cycle the scaler with Ctrl+Alt+S
+  qemu-options: do not list scaler= for the GTK display
 
- hw/input/ps2.c         | 131 +++++++++++++++++++++++++++++---
- include/hw/input/ps2.h |   4 +
- include/ui/gtk.h       |   4 +-
- include/ui/sdl2.h      |   3 +
- qapi/ui.json           |  31 +++++++-
- qemu-options.hx        |  10 +++
- ui/gtk.c               |  57 ++++++++++----
- ui/sdl2-2d.c           | 164 ++++++++++++++++++++++++++++++++++++++++-
- ui/sdl2-gl.c           |  12 ++-
- ui/sdl2.c              |  19 ++++-
- 10 files changed, 401 insertions(+), 34 deletions(-)
+ docs/system/keys.rst.inc |   4 +
+ hw/input/ps2.c           | 131 ++++++++++++++++++++++++++++---
+ include/hw/input/ps2.h   |   4 +
+ include/ui/gtk.h         |   4 +-
+ include/ui/sdl2.h        |   6 ++
+ qapi/ui.json             |  39 +++++++++-
+ qemu-options.hx          |  16 +++-
+ ui/gtk.c                 |  57 ++++++++++----
+ ui/sdl2-2d.c             | 163 ++++++++++++++++++++++++++++++++++++++-
+ ui/sdl2-gl.c             |  14 +++-
+ ui/sdl2.c                |  52 +++++++++++--
+ 11 files changed, 449 insertions(+), 41 deletions(-)
 
 -- 
 2.53.0

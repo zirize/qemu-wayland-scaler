@@ -1,7 +1,7 @@
 From b07e33a04b83ba1e9ae343e30f3866925d679e46 Mon Sep 17 00:00:00 2001
 From: zirize <zirize@gmail.com>
 Date: Wed, 16 Sep 2026 04:06:30 +0900
-Subject: [PATCH 5/6] ui: add a scaler option for the SDL display
+Subject: [PATCH 5/9] ui: add a scaler option for the SDL display
 
 The guest display is always stretched to the window with a bilinear
 filter, which is a poor fit for the low resolution guests SDL tends to be

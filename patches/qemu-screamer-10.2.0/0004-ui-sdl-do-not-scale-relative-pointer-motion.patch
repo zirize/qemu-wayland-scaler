@@ -1,7 +1,7 @@
 From fc15436c9e5cd5244a9e10dee4f5e860e4969beb Mon Sep 17 00:00:00 2001
 From: zirize <zirize@gmail.com>
 Date: Wed, 16 Sep 2026 05:24:11 +0900
-Subject: [PATCH 4/6] ui/sdl: do not scale relative pointer motion
+Subject: [PATCH 4/9] ui/sdl: do not scale relative pointer motion
 
 handle_mousemotion() converts the pointer position from window to guest
 coordinates, which is right - it is a point on the screen and the guest

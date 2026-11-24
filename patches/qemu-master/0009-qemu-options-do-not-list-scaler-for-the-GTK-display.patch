@@ -1,0 +1,31 @@
+From 49c12fc700c9a571b507ddb7ba4f6586d560379d Mon Sep 17 00:00:00 2001
+From: zirize <zirize@gmail.com>
+Date: Tue, 24 Nov 2026 22:55:03 +0900
+Subject: [PATCH 9/9] qemu-options: do not list scaler= for the GTK display
+
+The scaler option was added to the GTK usage line together with the SDL
+one, but the GTK display never reads it, so the help advertised an option
+that does nothing there.
+
+Signed-off-by: zirize <zirize@gmail.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Q78o7VG6jAieKBpedzps5M
+---
+ qemu-options.hx | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/qemu-options.hx b/qemu-options.hx
+index 89bd41c280..eb11f2c42c 100644
+--- a/qemu-options.hx
++++ b/qemu-options.hx
+@@ -2259,7 +2259,6 @@ DEF("display", HAS_ARG, QEMU_OPTION_display,
+     "-display gtk[,clipboard=on|off][,full-screen=on|off][,gl=on|off]\n"
+     "            [,grab-on-hover=on|off][,show-tabs=on|off][,show-cursor=on|off]\n"
+     "            [,window-close=on|off][,show-menubar=on|off][,zoom-to-fit=on|off]\n"
+-    "            [,scaler=linear|nearest|integer|integerplus]\n"
+ #endif
+ #if defined(CONFIG_VNC)
+     "-display vnc=<display>[,<optargs>]\n"
+-- 
+2.53.0
+

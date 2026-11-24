@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>QEMU on Wayland: mouse dead zones, slow Windows mouse, blurry scaling, and integer scaling</title>
-<meta name="description" content="Why the QEMU guest mouse drifts or freezes on Wayland/KDE, why the mouse crawls in a Windows XP guest, why the display is blurry under fractional display scaling, and patches adding integer scaling to the QEMU SDL display." />
+<meta name="description" content="Why the QEMU guest mouse drifts or freezes on Wayland/KDE, why the mouse crawls in a Windows XP guest, why the display is blurry under fractional display scaling, and patches adding integer scaling and zoom-to-fit to the QEMU SDL display." />
 <meta name="author" content="zirize" />
 <meta name="robots" content="index, follow" />
 <link rel="canonical" href="https://zirize.github.io/qemu-wayland-scaler/" />
@@ -75,6 +75,7 @@ footer{text-align:center;padding:32px 20px;border-top:1px solid var(--border);co
 <li>The guest display is <strong>blurry and bilinear-filtered</strong> even at an exact 2x or 3x zoom, on a desktop using <strong>fractional display scaling</strong> (125%, 145%, 150%…).</li>
 <li>You want <strong>pixel-perfect integer scaling</strong> for a low-resolution guest — Mac OS 9, Windows 98, DOS — and QEMU only offers a bilinear stretch.</li>
 <li>The mouse in a <strong>Windows XP guest crawls</strong>, and the lower the guest resolution the worse it gets — while the same host mouse behaves normally in a Linux or Mac OS 9 guest.</li>
+<li>The <code>-display sdl</code> window <strong>snaps back to a small 1:1 size</strong> every time the guest changes resolution — BIOS, boot loader, desktop — throwing away the size you gave it.</li>
 </ul>
 </div>
 
@@ -112,10 +113,10 @@ footer{text-align:center;padding:32px 20px;border-top:1px solid var(--border);co
 
 <h2>4. The scaler option</h2>
 
-<p>The last patch adds <code>scaler=</code> to the SDL display:</p>
+<p>A patch adds <code>scaler=</code> to the SDL display:</p>
 
 <pre><code>qemu-system-ppc  -display sdl,scaler=integerplus  ...
-qemu-system-i386 -display sdl,scaler=integer      ...</code></pre>
+qemu-system-i386 -display sdl,scaler=integer,zoom-to-fit=on  ...</code></pre>
 
 <table>
 <tr><th>mode</th><th>behaviour</th></tr>
@@ -131,6 +132,12 @@ qemu-system-i386 -display sdl,scaler=integer      ...</code></pre>
 
 <div class="note"><strong>The GL path does not implement the scaler.</strong> With <code>gl=on</code> the guest is stretched over the window with a plain bilinear filter regardless of <code>scaler=</code>. Use the default 2D path.</div>
 
+<h3>Switching the mode while the guest runs</h3>
+
+<p><code>scaler=</code> is read once at start-up, so comparing the modes on a guest used to mean restarting it. The grab modifier plus <strong>S</strong> — Ctrl+Alt+S by default — now steps through <code>linear → nearest → integer → integerplus</code> while the guest runs, and the window title names the mode while it differs from the one QEMU was started with. <code>S</code> is used by neither the SDL nor the GTK hotkeys, and unlike F1–F12 or Backspace a guest has no common use for it together with Ctrl+Alt. With <code>gl=on</code> the key goes to the guest, since there is no scaler to cycle.</p>
+
+<p>The option had also been added to the GTK display's usage line, where nothing reads it. A last small patch takes it out of the GTK help.</p>
+
 <h2>5. The PS/2 mouse ignores the sample rate the guest selected</h2>
 
 <p>A PS/2 mouse is sampled at a fixed rate, and the guest picks that rate with <code>AUX_SET_SAMPLE</code>. QEMU records the value and then ignores it: every host pointer event is turned into a packet and sent straight away.</p>
@@ -141,14 +148,24 @@ qemu-system-i386 -display sdl,scaler=integer      ...</code></pre>
 
 <p>Measured on a Windows XP guest: packets drop from around 1000/s to a 96/s ceiling, and the mean counts per packet go from about 1 to 7.55. Mac OS 9 is unaffected, because ADB is polled by the guest and QEMU already accumulates motion between polls.</p>
 
+<h2>6. The SDL window shrinks back on every guest mode change</h2>
+
+<p>Whenever the guest switches resolution, the SDL display calls <code>sdl2_window_resize()</code> and sets the window to the new surface size, undoing whatever size you gave it. With a scaler that fits the guest into the window that is rarely wanted: a guest that boots through several modes ends up in a small 1:1 window each time, and no SDL option turned it off.</p>
+
+<p>GTK and Cocoa already have <code>zoom-to-fit</code> for this, so the patch adds the same option to the SDL display. When it is on, the new resolution is scaled into the current window instead. Ctrl+Alt+0 still resizes the window to 1:1, since that is an explicit request.</p>
+
+<p>Measured with a boot sector that switches between text mode (720x400) and mode 13h (320x200) every three seconds, the window set to 1440x800 physical pixels: with <code>zoom-to-fit=on</code> it stayed 1440x800 at the same position throughout; without it, it shrank to 1x on every switch.</p>
+
 <h2>The patches</h2>
 
-<p>Six commits, each building on its own and checkpatch-clean. Two series, the same changes against two bases:</p>
+<p>Nine commits, each building on its own; <code>checkpatch.pl</code> reports no style problems, only QEMU's policy error against AI-assisted contributions. Two series, the same changes against two bases:</p>
 
 <ul>
 <li><a href="https://github.com/zirize/qemu-wayland-scaler/tree/main/patches/qemu-master">QEMU master (11.1.50)</a>, with a cover letter — branch <a href="https://github.com/zirize/qemu/tree/ui-scaler-and-motion-fixes"><code>ui-scaler-and-motion-fixes</code></a></li>
 <li><a href="https://github.com/zirize/qemu-wayland-scaler/tree/main/patches/qemu-screamer-10.2.0">mcayland/qemu <code>screamer-v10.2.0</code></a>, the Mac OS 9 / PowerPC audio fork rebased on QEMU 10.2.0 — branch <a href="https://github.com/zirize/qemu/tree/screamer-ui-scaler-and-motion-fixes"><code>screamer-ui-scaler-and-motion-fixes</code></a></li>
 </ul>
+
+<p>The <code>zirize/qemu</code> branches also carry one unrelated commit each that is not in these series: a non-blocking parallel port on the master branch (see <a href="https://zirize.github.io/qemu-parallel-port-freeze/">QEMU parallel port freeze</a>) and a <code>sungem</code> short-frame fix on the screamer branch.</p>
 
 <pre><code>git am /path/to/patches/qemu-master/00*.patch</code></pre>
 
@@ -157,15 +174,18 @@ ui/gtk: do not take ownership of the pointer if the grab failed
 ui/sdl: render at the output's pixel density
 ui/sdl: do not scale relative pointer motion
 ui: add a scaler option for the SDL display
-hw/input/ps2: send packets at the sample rate the guest asked for</code></pre>
+hw/input/ps2: send packets at the sample rate the guest asked for
+ui/sdl: add a zoom-to-fit option
+ui/sdl: cycle the scaler with Ctrl+Alt+S
+qemu-options: do not list scaler= for the GTK display</code></pre>
 
-<p>The last one is independent of the display work and touches <code>hw/input</code> rather than <code>ui/</code>. It is kept in the same series only because it came out of chasing the same "the mouse feels wrong" report.</p>
+<p>The PS/2 one is independent of the display work and touches <code>hw/input</code> rather than <code>ui/</code>. It is kept in the same series only because it came out of chasing the same "the mouse feels wrong" report.</p>
 
 <h2>Tested on</h2>
 
-<p>Ubuntu 26.04, KDE Plasma on Wayland at 1.45 display scale, SDL 2.32.10, with a <code>mac99</code> Mac OS 9.2.2 guest and <code>q35</code> Windows XP and Windows 98 SE guests.</p>
+<p>Ubuntu 26.04, KDE Plasma on Wayland at 1.45 display scale, SDL 2.32.10, with a <code>mac99</code> Mac OS 9.2.2 guest and <code>q35</code> Windows XP and Windows 98 SE guests. Zoom-to-fit was measured on <code>qemu-system-i386</code> as above; on the screamer build only start-up with the option was checked, the resize path being the same code. The scaler hotkey was tried on the Windows 98 SE guest.</p>
 
-<p>Not submitted upstream. Offered as-is for anyone hitting the same problems. The patches are against QEMU and carry QEMU's licence (GPLv2).</p>
+<p>Not submitted upstream: QEMU does not accept contributions made with AI tools, and these were. Offered as-is for anyone hitting the same problems. The patches are against QEMU and carry QEMU's licence (GPLv2).</p>
 
 </main>
 <footer>
